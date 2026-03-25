@@ -2,7 +2,7 @@ import time
 from google import genai
 
 # 3. API 키 직접 입력 및 클라이언트 생성
-api_key = "AIzaSyBWctVgqqRWzcT_wA2cqUVUbmSExk56nIg"
+api_key = "ThisIsFakeKey"
 client = genai.Client(api_key=api_key)
 
 # 1. 분석할 로컬 동영상 파일 경로 설정 (윈도우 경로 오류를 막기 위해 문자열 앞에 r을 붙였습니다)
