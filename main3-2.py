@@ -14,7 +14,7 @@ file_path = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근
 
 print("데이터를 불러오고 분석을 시작합니다...")
 try:
-    df = pd.read_csv(file_path, encoding='cp949')
+    df = pd.read_csv(file_path, encoding='cp949', low_memory=False)
 
     # 2. "법정동주소광역시도코드"가 11(서울) 또는 41(경기)인 데이터 필터링
     # isin() 함수를 사용하면 두 개 이상의 조건을 한 번에 쉽게 필터링할 수 있습니다.
@@ -26,6 +26,10 @@ try:
         # 3. 가입자수 기준으로 상위 10개 기업 추출
         top_10_companies = df_seoul_gyeonggi.nlargest(10, '가입자수')[['사업장명', '가입자수']]
 
+        # --- 텍스트 결과 출력 추가 ---
+        print("=== 서울/경기 가입자수 상위 10개 기업 리스트 ===")
+        print(top_10_companies.to_string(index=False))
+        # ---------------------------
         # --- 그래프 그리기 ---
         plt.figure(figsize=(12, 6))  # 그래프의 가로, 세로 크기 설정
 

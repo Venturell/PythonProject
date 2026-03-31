@@ -1,44 +1,76 @@
-import time
-from google import genai
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import platform
+import warnings
 
-# 3. API 키 직접 입력 및 클라이언트 생성
-api_key = "ThisIsFakeKey"
-client = genai.Client(api_key=api_key)
+warnings.filterwarnings('ignore')  # 불필요한 경고 메시지 숨김
 
-# 1. 분석할 로컬 동영상 파일 경로 설정 (윈도우 경로 오류를 막기 위해 문자열 앞에 r을 붙였습니다)
-video_path = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근\26년도 1학기\AI기반피플애널리틱스\project#1\lee.mp4"
+# --- 1. 한글 폰트 및 마이너스 기호 깨짐 방지 설정 ---
+if platform.system() == 'Windows':
+    plt.rc('font', family='Malgun Gothic')  # 윈도우 맑은 고딕
+plt.rcParams['axes.unicode_minus'] = False
+
+# --- 2. 데이터 불러오기 ---
+file_path = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근\26년도 1학기\AI기반피플애널리틱스\project#2\2_PAproject_2_3_EDA.csv"
+
+print("데이터를 불러오고 전처리를 시작합니다...")
 
 try:
-    print("Google AI 서버로 동영상을 업로드하는 중입니다...")
-    # 2. google-genai 라이브러리의 files API로 업로드 수행
-    video_file = client.files.upload(file=video_path)
-    print(f"업로드 완료! (파일 이름: {video_file.name})")
+    df = pd.read_csv(file_path, encoding='cp949', low_memory=False)
 
-    # 동영상 처리가 끝날 때까지 대기하는 로직
-    print("모델이 분석할 수 있도록 동영상을 처리 중입니다", end="")
-    while video_file.state.name == "PROCESSING":
-        print(".", end="", flush=True)
-        time.sleep(3)  # 3초마다 상태 확인
-        video_file = client.files.get(name=video_file.name)
-    print() # 줄바꿈
+    # --- 3. 이탈 여부(퇴사) 기준 생성 ---
+    # Termination_Date(퇴사일)가 비어있지 않다(notnull)면 퇴사자(1), 비어있다면 재직자(0)로 간주합니다.
+    df['Is_Terminated'] = df['Termination_Date'].notnull().astype(int)
 
-    if video_file.state.name == "FAILED":
-        raise Exception("동영상 처리에 실패했습니다. 파일이 손상되었거나 지원하지 않는 포맷일 수 있습니다.")
+    # --- 4. 데이터 집계 (Grouping) ---
 
-    print("처리 완료! AI 모델에게 행동 분석을 요청합니다...")
+    # [데이터 1] 부서(Department) 및 직무(Job_Role)별 이탈율 계산
+    # 퇴사자 수를 해당 그룹의 전체 인원으로 나누어 평균(mean)을 구한 뒤 100을 곱해 퍼센트(%)로 만듭니다.
+    dept_role_turnover = df.groupby(['Department', 'Job_Role'])['Is_Terminated'].mean().reset_index()
+    dept_role_turnover['Turnover_Rate(%)'] = dept_role_turnover['Is_Terminated'] * 100
 
-    # 4. gemini-2.5-flash 모델을 사용하여 행동 분석 수행
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[
-            video_file,
-            "이 동영상의 인물이 어떤 행동을 하고 있는지 구체적으로 분석해 줘. 시간 흐름이나 주요 동작 위주로 설명해 주면 좋아."
-        ]
-    )
+    # 히트맵을 그리기 위해 데이터를 피벗 테이블 형태로 변환 (행: 부서, 열: 직무, 값: 이탈율)
+    heatmap_data = dept_role_turnover.pivot(index='Department', columns='Job_Role', values='Turnover_Rate(%)')
 
-    print("\n================ [ 행동 분석 결과 ] ================\n")
-    print(response.text)
-    print("\n====================================================\n")
+    # [데이터 2] 성과등급(Performance_Rating)별 이탈율 계산
+    perf_turnover = df.groupby('Performance_Rating')['Is_Terminated'].mean().reset_index()
+    perf_turnover['Turnover_Rate(%)'] = perf_turnover['Is_Terminated'] * 100
+    perf_turnover = perf_turnover.sort_values(by='Performance_Rating')  # 성과등급 순으로 정렬
 
+    # --- 5. 시각화 진행 (Figure 1: 히트맵, Figure 2: 막대그래프) ---
+    fig, axes = plt.subplots(2, 1, figsize=(14, 16))
+
+    # [그래프 1] 부서 및 직무별 이탈율 히트맵 (Heatmap)
+    # cmap="YlOrRd"는 값이 높을수록 노란색에서 진한 빨간색으로 변하게 합니다.
+    sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap="YlOrRd", ax=axes[0],
+                linewidths=.5, cbar_kws={'label': '이탈율 (%)'}, annot_kws={"size": 11})
+    axes[0].set_title('🔥 부서(Department) 및 직무(Job_Role)별 이탈율 히트맵', fontsize=18, fontweight='bold', pad=20)
+    axes[0].set_xlabel('직무 (Job Role)', fontsize=14)
+    axes[0].set_ylabel('부서 (Department)', fontsize=14)
+    axes[0].tick_params(axis='x', rotation=45)  # 직무 이름이 길 경우를 대비해 45도 회전
+
+    # [그래프 2] 성과등급별 이탈율 막대그래프 (Bar Chart)
+    sns.barplot(x='Performance_Rating', y='Turnover_Rate(%)', data=perf_turnover,
+                palette='viridis', ax=axes[1], edgecolor='black')
+    axes[1].set_title('📊 성과등급(Performance Rating)별 이탈율', fontsize=18, fontweight='bold', pad=20)
+    axes[1].set_xlabel('성과등급', fontsize=14)
+    axes[1].set_ylabel('이탈율 (%)', fontsize=14)
+
+    # 막대그래프 위에 정확한 수치(%) 표시
+    for p in axes[1].patches:
+        axes[1].annotate(f"{p.get_height():.1f}%",
+                         (p.get_x() + p.get_width() / 2., p.get_height()),
+                         ha='center', va='center',
+                         fontsize=13, color='black', fontweight='bold', xytext=(0, 10),
+                         textcoords='offset points')
+
+    # 레이아웃 간격 조정 및 출력
+    plt.tight_layout(pad=3.0)
+    print("🎉 이탈율 시각화가 완료되었습니다. 출력된 두 개의 그래프를 확인해 주세요!")
+    plt.show()
+
+except FileNotFoundError:
+    print(f"오류: 지정된 경로에서 파일을 찾을 수 없습니다.\n경로: {file_path}")
 except Exception as e:
-    print(f"\n실행 중 오류가 발생했습니다: {e}")
+    print(f"데이터 처리 중 오류가 발생했습니다: {e}")

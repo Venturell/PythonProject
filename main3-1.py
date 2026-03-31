@@ -6,7 +6,7 @@ file_path = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근
 try:
     # 6. 한글 변수명이 포함된 데이터이므로 cp949 인코딩으로 불러오기
     print("NPS 데이터를 불러오는 중입니다...")
-    df = pd.read_csv(file_path, encoding='cp949')
+    df = pd.read_csv(file_path, encoding='cp949', low_memory=False)
 
     # 2. 조건 필터링: 사업장가입상태코드가 1(정상)이고, 가입자수가 2000명 이상인 기업
     # (결측치나 오류 데이터 방지를 위해 필터링을 먼저 진행합니다)
