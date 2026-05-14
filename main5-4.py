@@ -8,7 +8,7 @@ warnings.filterwarnings('ignore')
 # --- 1. API 키 및 모델 설정 ---
 # ==========================================
 # 🚨 여기에 Google AI Studio에서 발급받은 API 키를 입력하세요!
-API_KEY = "AI어쩌구API키입력하는곳"
+API_KEY = "AI어쩌구저쩌구를입력"
 client = genai.Client(api_key=API_KEY)
 MODEL_NAME = 'gemini-2.5-flash'
 
