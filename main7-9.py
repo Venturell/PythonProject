@@ -1,241 +1,587 @@
+# ============================================================
+# Organizational Reorganization Impact Analysis (IT Department)
+# ============================================================
+
 import pandas as pd
 import numpy as np
 import networkx as nx
-import os
-import warnings
-
-warnings.filterwarnings('ignore')
-
-# ==========================================
-# --- 1. 파일 경로 및 환경 설정 ---
-# ==========================================
-EXCEL_PATH = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근\26년도 1학기\AI기반피플애널리틱스\project#7\7_PAproject_7_3_SNA.xlsx"
-BASE_DIR = os.path.dirname(EXCEL_PATH)
-
-# 저장 파일명
-OUT_COMPARE = os.path.join(BASE_DIR, "2024Q3_조직개편_전후비교.xlsx")
-OUT_IT_COMPARE = os.path.join(BASE_DIR, "2024Q3_IT관련_상세비교.xlsx")
-OUT_PRE_MAT = os.path.join(BASE_DIR, "2024Q3_Pre_팀매트릭스.xlsx")
-OUT_POST_MAT = os.path.join(BASE_DIR, "2024Q3_Post_팀매트릭스.xlsx")
-
-print("데이터를 로드하고 조직개편 전후 분석을 시작합니다...\n")
-
-# ==========================================
-# --- 2. 데이터 로드 및 이벤트 검증 ---
-# ==========================================
-df_emp = pd.read_excel(EXCEL_PATH, sheet_name='employees')
-df_edges_raw = pd.read_excel(EXCEL_PATH, sheet_name='edges')
-
-# 이벤트 시트 확인 (없으면 통과)
-try:
-    df_events = pd.read_excel(EXCEL_PATH, sheet_name='events')
-    event_info = df_events[
-        (df_events['event_type'] == 'reorganization') &
-        (df_events['time_id'] == '2024Q3') &
-        (df_events['affected_department'] == 'IT')
-        ]
-except:
-    event_info = pd.DataFrame()
-
-# 직원 매핑 도구
-team_map = dict(zip(df_emp['employee_id'], df_emp['team']))
-dept_map = dict(zip(df_emp['employee_id'], df_emp['department']))
-valid_ids = set(df_emp['employee_id'])
-
-# ==========================================
-# --- 3. 데이터 필터링 및 매핑 ---
-# ==========================================
-# communication, 자기 자신 제외, 유효한 직원
-df_filtered = df_edges_raw[
-    (df_edges_raw['tie_type'] == 'communication') &
-    (df_edges_raw['source'] != df_edges_raw['target']) &
-    (df_edges_raw['source'].isin(valid_ids)) &
-    (df_edges_raw['target'].isin(valid_ids))
-    ].copy()
-
-# 속성 매핑
-df_filtered['source_team'] = df_filtered['source'].map(team_map)
-df_filtered['target_team'] = df_filtered['target'].map(team_map)
-df_filtered['source_department'] = df_filtered['source'].map(dept_map)
-df_filtered['target_department'] = df_filtered['target'].map(dept_map)
-
-# Pre / Post 분리 (2024Q3 기준)
-REORG_TIME = '2024Q3'
-df_pre = df_filtered[df_filtered['time_id'] < REORG_TIME].copy()
-df_post = df_filtered[df_filtered['time_id'] >= REORG_TIME].copy()
-
-
-# ==========================================
-# --- 4. 분석 지표 계산 함수 ---
-# ==========================================
-def calculate_metrics(df_directed):
-    if df_directed.empty: return {}
-
-    # 1. Undirected 변환 (node_a, node_b 정렬)
-    df_directed['node_a'] = df_directed[['source', 'target']].min(axis=1)
-    df_directed['node_b'] = df_directed[['source', 'target']].max(axis=1)
-    df_undirected = df_directed.groupby(['node_a', 'node_b']).agg(
-        interaction_count=('interaction_count', 'sum'),
-        team_a=('source_team', 'first'),  # 동일성 확인용
-        team_b=('target_team', 'first')
-    ).reset_index()
-
-    # 노드 속성을 가져오기 위해 node_a, node_b 팀 매핑 재적용
-    df_undirected['team_a'] = df_undirected['node_a'].map(team_map)
-    df_undirected['team_b'] = df_undirected['node_b'].map(team_map)
-    df_undirected['is_within'] = df_undirected['team_a'] == df_undirected['team_b']
-
-    # 2. NetworkX 그래프 생성
-    G = nx.Graph()
-    for _, row in df_emp.iterrows():
-        G.add_node(row['employee_id'], team=row['team'])
-
-    for _, row in df_undirected.iterrows():
-        G.add_edge(row['node_a'], row['node_b'], weight=row['interaction_count'])
-
-    G_active = G.subgraph([n for n, d in G.degree() if d > 0])  # 고립 노드 제외
-
-    # 3. 기초 지표
-    total_ties = len(df_undirected)
-    within_ties = df_undirected['is_within'].sum()
-    between_ties = total_ties - within_ties
-
-    # 4. 통계 지표
-    teams = df_emp['team'].unique()
-    team_communities = [set(df_emp[df_emp['team'] == t]['employee_id']) for t in teams]
-
-    detected_comms = list(nx.community.greedy_modularity_communities(G_active, weight='weight')) if len(
-        G_active) > 0 else []
-
-    metrics = {
-        'number_of_nodes': G_active.number_of_nodes(),
-        'number_of_edges': G_active.number_of_edges(),
-        'total_ties': total_ties,
-        'within_team_ties': within_ties,
-        'between_team_ties': between_ties,
-        'within_team_ratio': within_ties / total_ties if total_ties > 0 else 0,
-        'between_team_ratio': between_ties / total_ties if total_ties > 0 else 0,
-        'density': nx.density(G_active) if len(G_active) > 0 else 0,
-        'average_degree': np.mean([d for n, d in G_active.degree()]) if len(G_active) > 0 else 0,
-        'average_weighted_degree': np.mean([d for n, d in G_active.degree(weight='weight')]) if len(
-            G_active) > 0 else 0,
-        'team_assortativity': nx.attribute_assortativity_coefficient(G_active, 'team') if len(G_active) > 0 else 0,
-        'team_modularity': nx.community.modularity(G, team_communities, weight='weight') if len(G.edges) > 0 else 0,
-        'detected_community_modularity': nx.community.modularity(G_active, detected_comms,
-                                                                 weight='weight') if detected_comms else 0,
-        'num_detected_communities': len(detected_comms)
-    }
-    return metrics
-
-
-def calculate_it_metrics(df_directed):
-    if df_directed.empty: return {}
-
-    # IT 관련 (Directed 기준)
-    it_related = df_directed[(df_directed['source_department'] == 'IT') | (df_directed['target_department'] == 'IT')]
-    it_internal = df_directed[(df_directed['source_department'] == 'IT') & (df_directed['target_department'] == 'IT')]
-    it_outbound = df_directed[(df_directed['source_department'] == 'IT') & (df_directed['target_department'] != 'IT')]
-    it_inbound = df_directed[(df_directed['source_department'] != 'IT') & (df_directed['target_department'] == 'IT')]
-
-    it_related_ties = len(it_related)
-    it_cross_dept_ties = len(it_outbound) + len(it_inbound)
-
-    return {
-        'it_related_ties': it_related_ties,
-        'it_internal_ties': len(it_internal),
-        'it_outbound_ties': len(it_outbound),
-        'it_inbound_ties': len(it_inbound),
-        'it_cross_dept_ties': it_cross_dept_ties,
-        'it_internal_ratio': len(it_internal) / it_related_ties if it_related_ties > 0 else 0,
-        'it_cross_dept_ratio': it_cross_dept_ties / it_related_ties if it_related_ties > 0 else 0
-    }
-
-
-# ==========================================
-# --- 5. 지표 산출 및 통합 ---
-# ==========================================
-# 전체 요약
-pre_metrics = calculate_metrics(df_pre)
-post_metrics = calculate_metrics(df_post)
-
-comp_df = pd.DataFrame({'Pre (Before 24Q3)': pre_metrics, 'Post (After 24Q3)': post_metrics})
-comp_df['Difference'] = comp_df['Post (After 24Q3)'] - comp_df['Pre (Before 24Q3)']
-comp_df = comp_df.round(4).reset_index().rename(columns={'index': 'Indicator'})
-
-# IT 상세
-pre_it = calculate_it_metrics(df_pre)
-post_it = calculate_it_metrics(df_post)
-
-it_df = pd.DataFrame({'Pre (Before 24Q3)': pre_it, 'Post (After 24Q3)': post_it})
-it_df['Difference'] = it_df['Post (After 24Q3)'] - it_df['Pre (Before 24Q3)']
-it_df = it_df.round(4).reset_index().rename(columns={'index': 'IT Indicator'})
-
-# 팀-팀 매트릭스 (Directed 기준 interaction_count 합산)
-pre_matrix = pd.pivot_table(df_pre, values='interaction_count', index='source_team', columns='target_team',
-                            aggfunc='sum', fill_value=0)
-post_matrix = pd.pivot_table(df_post, values='interaction_count', index='source_team', columns='target_team',
-                             aggfunc='sum', fill_value=0)
-
-# ==========================================
-# --- 6. 콘솔 출력 및 판정 ---
-# ==========================================
-print("=" * 80)
-print("1. [분석 기준]")
-print(f" - 조직개편 시점(REORG_TIME): {REORG_TIME}")
-print(" - 분석 대상: Communication (자기자신 제외, Undirected/Directed 병행)")
-print("-" * 80)
-
-print("2. [Events 시트 검증]")
-if not event_info.empty:
-    print(" ✅ 'reorganization' 이벤트 확인됨 (대상: IT, 시점: 2024Q3)")
-else:
-    print(" ⚠️ 조건에 일치하는 이벤트가 없으나 분석은 지정된 시점 기준으로 진행합니다.")
-print("-" * 80)
-
-print("3. [전체 및 전후 비교 요약 테이블]")
-print(comp_df.to_string(index=False))
-print("-" * 80)
-
-print("4. [IT 관련 상세 비교]")
-print(it_df.to_string(index=False))
-print("-" * 80)
-
-print("5. [해석 가이드]")
-print(" - between_team_ratio 상승: 부서/팀 간 교류가 증가했음을 의미")
-print(" - team_assortativity 감소: '끼리끼리' 뭉치는 현상이 완화됨을 의미")
-print(" - team_modularity 감소: 기존 팀 구조의 장벽이 허물어지고 네트워크가 유연해짐을 의미")
-print(" - it_cross_dept_ratio 상승: 개편 후 IT 부서가 타 부서와 더 많이 협업하고 있음을 의미")
-print("-" * 80)
-
-# 판정 로직 변수 추출
-btr_diff = comp_df.loc[comp_df['Indicator'] == 'between_team_ratio', 'Difference'].values[0]
-ta_diff = comp_df.loc[comp_df['Indicator'] == 'team_assortativity', 'Difference'].values[0]
-tm_diff = comp_df.loc[comp_df['Indicator'] == 'team_modularity', 'Difference'].values[0]
-den_diff = comp_df.loc[comp_df['Indicator'] == 'density', 'Difference'].values[0]
-it_cross_diff = it_df.loc[it_df['IT Indicator'] == 'it_cross_dept_ratio', 'Difference'].values[0]
-
-# 판정 조건 (감소폭의 경우 Difference가 마이너스이므로 부호 반전하여 판정)
-is_changed = (
-        (btr_diff > 0.05) or
-        (-ta_diff > 0.05) or  # 감소폭 > 0.05
-        (-tm_diff > 0.05) or  # 감소폭 > 0.05
-        (den_diff > 0.01) or
-        (it_cross_diff > 0.05)
+import re
+from pathlib import Path
+from networkx.algorithms.community import (
+    greedy_modularity_communities,
+    modularity
 )
 
-print("6. [최종 판정]")
-if is_changed:
-    print(" 💡 [판결]: 하나 이상의 핵심 지표가 유의미하게 변동했습니다. 조직개편 이후 연결 구조가 바뀌었을 가능성이 있습니다.")
-else:
-    print(" ⚖️ [판결]: 조직개편 전후 연결 구조 변화가 아주 뚜렷하지는 않습니다.")
+# ------------------------------------------------------------
+# 파일 경로
+# ------------------------------------------------------------
+
+file_path = r"C:\Users\b2209\OneDrive\바탕 화면\박효근\20202855 박효근\26년도 1학기\AI기반피플애널리틱스\project#7\7_PAproject_7_3_SNA.xlsx"
+
+REORG_TIME = "2024Q3"
+TARGET_DEPARTMENT = "IT"
+
+# ------------------------------------------------------------
+# 데이터 로드
+# ------------------------------------------------------------
+
+employees = pd.read_excel(file_path, sheet_name="employees")
+edges = pd.read_excel(file_path, sheet_name="edges")
+events = pd.read_excel(file_path, sheet_name="events")
+
+print("=" * 80)
+print("ORGANIZATIONAL REORGANIZATION IMPACT ANALYSIS")
 print("=" * 80)
 
-# ==========================================
-# --- 7. 결과 엑셀 저장 ---
-# ==========================================
-comp_df.to_excel(OUT_COMPARE, index=False)
-it_df.to_excel(OUT_IT_COMPARE, index=False)
-pre_matrix.to_excel(OUT_PRE_MAT)
-post_matrix.to_excel(OUT_POST_MAT)
+# ------------------------------------------------------------
+# time_id 정렬 함수
+# ------------------------------------------------------------
 
-print(f"\n✅ 4개의 분석 결과 엑셀 파일이 성공적으로 저장되었습니다.\n저장 경로: {BASE_DIR}")
+def parse_time_id(x):
+
+    x = str(x).strip().upper()
+
+    match = re.search(r"(\d{4})\D*Q(\d+)", x)
+
+    if not match:
+        raise ValueError(f"잘못된 time_id 형식: {x}")
+
+    return (
+        int(match.group(1)),
+        int(match.group(2))
+    )
+
+# ------------------------------------------------------------
+# 직원 ID 타입 통일
+# ------------------------------------------------------------
+
+employees["employee_id"] = employees["employee_id"].astype(str)
+
+edges["source"] = edges["source"].astype(str)
+edges["target"] = edges["target"].astype(str)
+
+# ------------------------------------------------------------
+# communication만 사용
+# ------------------------------------------------------------
+
+edges = edges[
+    edges["tie_type"] == "communication"
+].copy()
+
+# 자기 자신 제거
+
+edges = edges[
+    edges["source"] != edges["target"]
+].copy()
+
+# 직원 존재 여부 확인
+
+valid_ids = set(
+    employees["employee_id"]
+)
+
+edges = edges[
+    edges["source"].isin(valid_ids)
+    &
+    edges["target"].isin(valid_ids)
+].copy()
+
+# ------------------------------------------------------------
+# 직원 정보 매핑
+# ------------------------------------------------------------
+
+emp_info = employees[
+    [
+        "employee_id",
+        "name",
+        "department",
+        "team"
+    ]
+].copy()
+
+source_map = emp_info.rename(
+    columns={
+        "employee_id": "source",
+        "department": "source_department",
+        "team": "source_team"
+    }
+)
+
+target_map = emp_info.rename(
+    columns={
+        "employee_id": "target",
+        "department": "target_department",
+        "team": "target_team"
+    }
+)
+
+edges = edges.merge(
+    source_map,
+    on="source",
+    how="left"
+)
+
+edges = edges.merge(
+    target_map,
+    on="target",
+    how="left"
+)
+
+# ------------------------------------------------------------
+# 조직개편 이벤트 확인
+# ------------------------------------------------------------
+
+event_check = events[
+    (events["event_type"] == "reorganization")
+    &
+    (events["time_id"].astype(str).str.upper() == REORG_TIME)
+    &
+    (events["affected_department"] == TARGET_DEPARTMENT)
+].copy()
+
+# ------------------------------------------------------------
+# pre / post 구분
+# ------------------------------------------------------------
+
+edges["period"] = np.where(
+    edges["time_id"].apply(parse_time_id)
+    <
+    parse_time_id(REORG_TIME),
+    "pre",
+    "post"
+)
+
+# ------------------------------------------------------------
+# 분석 함수
+# ------------------------------------------------------------
+
+def analyze_network(df):
+
+    if len(df) == 0:
+        return {}, pd.DataFrame()
+
+    temp = df.copy()
+
+    temp["node1"] = temp[
+        ["source", "target"]
+    ].min(axis=1)
+
+    temp["node2"] = temp[
+        ["source", "target"]
+    ].max(axis=1)
+
+    undirected_edges = (
+        temp
+        .groupby(
+            [
+                "node1",
+                "node2",
+                "source_team",
+                "target_team"
+            ],
+            as_index=False
+        )["interaction_count"]
+        .sum()
+    )
+
+    G = nx.Graph()
+
+    for _, row in undirected_edges.iterrows():
+
+        G.add_edge(
+            row["node1"],
+            row["node2"],
+            weight=row["interaction_count"]
+        )
+
+    number_of_nodes = G.number_of_nodes()
+    number_of_edges = G.number_of_edges()
+
+    density = (
+        nx.density(G)
+        if number_of_nodes > 1
+        else 0
+    )
+
+    degrees = dict(G.degree())
+
+    weighted_degrees = dict(
+        G.degree(weight="weight")
+    )
+
+    average_degree = (
+        np.mean(list(degrees.values()))
+        if len(degrees) > 0
+        else 0
+    )
+
+    average_weighted_degree = (
+        np.mean(list(weighted_degrees.values()))
+        if len(weighted_degrees) > 0
+        else 0
+    )
+
+    undirected_edges["tie_type2"] = np.where(
+        undirected_edges["source_team"]
+        ==
+        undirected_edges["target_team"],
+        "within",
+        "between"
+    )
+
+    within_team_ties = (
+        undirected_edges["tie_type2"]
+        .eq("within")
+        .sum()
+    )
+
+    between_team_ties = (
+        undirected_edges["tie_type2"]
+        .eq("between")
+        .sum()
+    )
+
+    total_ties = len(undirected_edges)
+
+    within_team_ratio = (
+        within_team_ties / total_ties
+        if total_ties > 0
+        else 0
+    )
+
+    between_team_ratio = (
+        between_team_ties / total_ties
+        if total_ties > 0
+        else 0
+    )
+
+    team_map = (
+        employees
+        .set_index("employee_id")["team"]
+        .to_dict()
+    )
+
+    nx.set_node_attributes(
+        G,
+        team_map,
+        "team"
+    )
+
+    try:
+        team_assortativity = (
+            nx.attribute_assortativity_coefficient(
+                G,
+                "team"
+            )
+        )
+    except:
+        team_assortativity = np.nan
+
+    communities_real = []
+
+    for team_name, grp in employees.groupby("team"):
+        nodes = set(
+            grp["employee_id"]
+        )
+
+        nodes = nodes.intersection(
+            set(G.nodes())
+        )
+
+        if len(nodes) > 0:
+            communities_real.append(nodes)
+
+    try:
+        team_modularity = modularity(
+            G,
+            communities_real,
+            weight="weight"
+        )
+    except:
+        team_modularity = np.nan
+
+    try:
+        detected = list(
+            greedy_modularity_communities(
+                G,
+                weight="weight"
+            )
+        )
+
+        detected_modularity = modularity(
+            G,
+            detected,
+            weight="weight"
+        )
+
+        num_detected = len(detected)
+
+    except:
+        detected_modularity = np.nan
+        num_detected = np.nan
+
+    summary = {
+        "number_of_nodes": number_of_nodes,
+        "number_of_edges": number_of_edges,
+        "total_ties": total_ties,
+        "within_team_ties": within_team_ties,
+        "between_team_ties": between_team_ties,
+        "within_team_ratio": round(within_team_ratio, 4),
+        "between_team_ratio": round(between_team_ratio, 4),
+        "density": round(density, 4),
+        "average_degree": round(average_degree, 4),
+        "average_weighted_degree": round(
+            average_weighted_degree,
+            4
+        ),
+        "team_assortativity": round(
+            team_assortativity,
+            4
+        ),
+        "team_modularity": round(
+            team_modularity,
+            4
+        ),
+        "detected_community_modularity": round(
+            detected_modularity,
+            4
+        ),
+        "num_detected_communities": num_detected
+    }
+
+    matrix = pd.pivot_table(
+        df,
+        index="source_team",
+        columns="target_team",
+        values="interaction_count",
+        aggfunc="sum",
+        fill_value=0
+    )
+
+    return summary, matrix
+
+# ------------------------------------------------------------
+# IT 분석 함수
+# ------------------------------------------------------------
+
+def analyze_it(df):
+
+    it_related = df[
+        (df["source_department"] == "IT")
+        |
+        (df["target_department"] == "IT")
+    ]
+
+    it_internal = df[
+        (df["source_department"] == "IT")
+        &
+        (df["target_department"] == "IT")
+    ]
+
+    it_outbound = df[
+        (df["source_department"] == "IT")
+        &
+        (df["target_department"] != "IT")
+    ]
+
+    it_inbound = df[
+        (df["source_department"] != "IT")
+        &
+        (df["target_department"] == "IT")
+    ]
+
+    it_cross = pd.concat(
+        [it_outbound, it_inbound]
+    )
+
+    related = len(it_related)
+
+    return {
+        "it_related_ties": related,
+        "it_internal_ties": len(it_internal),
+        "it_outbound_ties": len(it_outbound),
+        "it_inbound_ties": len(it_inbound),
+        "it_cross_dept_ties": len(it_cross),
+        "it_internal_ratio":
+            round(len(it_internal)/related,4)
+            if related > 0 else 0,
+        "it_cross_dept_ratio":
+            round(len(it_cross)/related,4)
+            if related > 0 else 0
+    }
+
+# ------------------------------------------------------------
+# 분석 수행
+# ------------------------------------------------------------
+
+pre_df = edges[
+    edges["period"] == "pre"
+]
+
+post_df = edges[
+    edges["period"] == "post"
+]
+
+pre_summary, pre_matrix = analyze_network(pre_df)
+post_summary, post_matrix = analyze_network(post_df)
+
+pre_it = analyze_it(pre_df)
+post_it = analyze_it(post_df)
+
+summary_df = pd.DataFrame(
+    [pre_summary, post_summary],
+    index=["PRE", "POST"]
+)
+
+it_df = pd.DataFrame(
+    [pre_it, post_it],
+    index=["PRE", "POST"]
+)
+
+comparison_df = pd.concat(
+    [
+        summary_df.T,
+        it_df.T
+    ],
+    axis=0
+)
+
+# ------------------------------------------------------------
+# 최종 판정
+# ------------------------------------------------------------
+
+change_flag = False
+
+try:
+
+    if (
+        post_summary["between_team_ratio"]
+        -
+        pre_summary["between_team_ratio"]
+    ) > 0.05:
+        change_flag = True
+
+    if (
+        post_summary["team_assortativity"]
+        -
+        pre_summary["team_assortativity"]
+    ) < -0.05:
+        change_flag = True
+
+    if (
+        post_summary["team_modularity"]
+        -
+        pre_summary["team_modularity"]
+    ) < -0.05:
+        change_flag = True
+
+    if (
+        post_summary["density"]
+        -
+        pre_summary["density"]
+    ) > 0.01:
+        change_flag = True
+
+    if (
+        post_it["it_cross_dept_ratio"]
+        -
+        pre_it["it_cross_dept_ratio"]
+    ) > 0.05:
+        change_flag = True
+
+except:
+    pass
+
+if change_flag:
+    final_judgement = (
+        "조직개편 이후 연결 구조가 바뀌었을 가능성이 있습니다."
+    )
+else:
+    final_judgement = (
+        "조직개편 전후 연결 구조 변화가 아주 뚜렷하지는 않습니다."
+    )
+
+# ------------------------------------------------------------
+# 출력
+# ------------------------------------------------------------
+
+print("\n[분석 기준]")
+print("Communication Network")
+print("REORG_TIME =", REORG_TIME)
+
+print("\n[조직개편 이벤트 확인]")
+print(event_check)
+
+print("\n[전체 요약]")
+print(summary_df)
+
+print("\n[전후 비교 테이블]")
+print(comparison_df)
+
+print("\n[IT 관련 상세 비교]")
+print(it_df)
+
+print("\n[PRE 팀-팀 매트릭스]")
+print(pre_matrix)
+
+print("\n[POST 팀-팀 매트릭스]")
+print(post_matrix)
+
+print("\n[해석 가이드]")
+print("between_team_ratio 증가 → 부서 간 협업 증가")
+print("team_assortativity 감소 → 팀 경계 약화")
+print("team_modularity 감소 → 사일로 약화")
+print("density 증가 → 연결성 증가")
+print("it_cross_dept_ratio 증가 → IT 협업 범위 확대")
+
+print("\n[최종 판정]")
+print(final_judgement)
+
+# ------------------------------------------------------------
+# Excel 저장
+# ------------------------------------------------------------
+
+output_file = (
+    Path(file_path).parent
+    /
+    "Reorganization_Impact_Analysis.xlsx"
+)
+
+with pd.ExcelWriter(
+    output_file,
+    engine="openpyxl"
+) as writer:
+
+    summary_df.to_excel(
+        writer,
+        sheet_name="전체요약"
+    )
+
+    comparison_df.to_excel(
+        writer,
+        sheet_name="전후비교"
+    )
+
+    it_df.to_excel(
+        writer,
+        sheet_name="IT상세비교"
+    )
+
+    pre_matrix.to_excel(
+        writer,
+        sheet_name="PRE_팀매트릭스"
+    )
+
+    post_matrix.to_excel(
+        writer,
+        sheet_name="POST_팀매트릭스"
+    )
+
+    event_check.to_excel(
+        writer,
+        sheet_name="조직개편이벤트",
+        index=False
+    )
+
+print("\nExcel 저장 완료")
+print(output_file)
